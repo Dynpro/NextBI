@@ -1,0 +1,1183 @@
+import React, { useState, useEffect } from 'react';
+import { LoadingButton } from '@mui/lab';
+import {
+  Box,
+  Button,
+  Grid,
+  Typography,
+  TextField,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  FormHelperText,
+  Paper,
+  Tab,
+  Tabs,
+  CircularProgress,
+  Chip,
+  IconButton,
+  Divider,
+  SelectChangeEvent,
+  ToggleButtonGroup,
+  ToggleButton,
+  Switch,
+  FormControlLabel,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  Delete as DeleteIcon,
+  BarChart as BarChartIcon,
+  PieChart as PieChartIcon,
+  ShowChart as LineChartIcon,
+  TableChart as TableChartIcon,
+  Code as CodeIcon,
+  Title as TitleIcon,
+  Subtitles as SubtitlesIcon,
+  TextFields as TextFieldsIcon,
+  Storage as StorageIcon
+} from '@mui/icons-material';
+import { projectService } from '../services/projectService';
+import { databaseConnectionService, DatabaseConnection } from '../services/databaseConnectionService';
+import { v4 as uuidv4 } from 'uuid';
+
+// Define interfaces for the component
+interface TilePosition {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// Backend tile data structure
+interface TileData {
+  id?: string;
+  title: string;
+  description?: string;
+  type: 'chart' | 'text' | 'kpi'; // Backend types
+  dashboardId: string;
+  connectionId?: string;
+  config?: TileConfig;
+  createdAt?: string;
+  updatedAt?: string;
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  position?: TilePosition;
+}
+
+// Data structure for creating or updating a tile
+interface CreateTileDto {
+  title: string;
+  description?: string;
+  type: 'chart' | 'text' | 'kpi';
+  dashboardId: string;
+  connectionId?: string;
+  config: TileConfig;
+  position?: TilePosition;
+}
+
+// Tab panel component for the editor
+interface TabPanelProps {
+  children?: React.ReactNode;
+  index: number;
+  value: number;
+}
+
+function TabPanel(props: TabPanelProps) {
+  const { children, value, index, ...other } = props;
+
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`tile-editor-tabpanel-${index}`}
+      aria-labelledby={`tile-editor-tab-${index}`}
+      {...other}
+    >
+      {value === index && (
+        <Box sx={{ p: 3 }}>
+          {children}
+        </Box>
+      )}
+    </div>
+  );
+}
+
+// Fields and configuration interfaces
+interface DimensionField {
+  fieldId: string;
+  fieldName: string;
+  aggregation?: string;
+}
+
+interface MeasureField {
+  fieldId: string;
+  fieldName: string;
+  aggregation: string;
+  alias?: string;
+}
+
+interface TextRow {
+  id: string;
+  type: 'header' | 'subheader' | 'text';
+  content: string;
+  isQuery: boolean;
+}
+
+interface DatabaseField {
+  name: string;
+  type: string;
+  table: string;
+  description?: string;
+}
+
+// Tile configuration structure
+interface TileConfig {
+  chartType?: 'bar' | 'line' | 'pie' | 'donut';
+  uiChartType?: string; // UI-specific chart type (including 'table')
+  uiType?: 'chart' | 'table' | 'metric' | 'text' | 'query'; // UI-specific type
+  dimensions?: DimensionField[];
+  measures?: MeasureField[];
+  textRows?: TextRow[];
+  connectionId?: string;
+  isQueryMode?: boolean; // For text/query tiles
+  customQuery?: string; // For text/query tiles in query mode
+  metadata?: {
+    sqlQuery?: string;
+    [key: string]: any;
+  };
+  sortBy?: {
+    field: string;
+    direction: 'asc' | 'desc';
+  };
+  limit?: number;
+  measure?: MeasureField;
+}
+
+interface TileEditorProps {
+  open: boolean;
+  onClose: () => void;
+  onSave: () => void;
+  dashboardId: string;
+  tile?: TileData; // Will be provided when editing an existing tile
+}
+
+const TileEditor: React.FC<TileEditorProps> = ({
+  open,
+  onClose,
+  tile,
+  dashboardId,
+  onSave
+}) => {
+  // Tab state
+  const [tabValue, setTabValue] = useState(0);
+
+  // State for tile basics
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [tileType, setTileType] = useState<'chart' | 'table' | 'metric' | 'text' | 'query'>('chart');
+  const [connectionId, setConnectionId] = useState('');
+  const [chartType, setChartType] = useState<'bar' | 'line' | 'pie' | 'donut'>('bar');
+
+  // Text tile rows
+  const [textRows, setTextRows] = useState<TextRow[]>([{
+    id: uuidv4(),
+    type: 'header',
+    content: '',
+    isQuery: false
+  }]);
+  
+  // Query mode for text/query tiles
+  const [isQueryMode, setIsQueryMode] = useState(false);
+  const [customQuery, setCustomQuery] = useState('');
+
+  // State for database connections and fields
+  const [connections, setConnections] = useState<DatabaseConnection[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [fields, setFields] = useState<DatabaseField[]>([]);
+  
+  // Dimensions and measures for chart/table/metric tiles
+  const [dimensions, setDimensions] = useState<DimensionField[]>([]);
+  const [measures, setMeasures] = useState<MeasureField[]>([]);
+  
+  // Handle tab change
+  const handleTabChange = (_: React.SyntheticEvent, newValue: number) => {
+    setTabValue(newValue);
+  };
+  
+  // Handle tile type change
+  const handleTileTypeChange = (event: React.MouseEvent<HTMLElement>, newTileType: 'chart' | 'table' | 'metric' | 'text' | 'query') => {
+    if (newTileType) {
+      setTileType(newTileType);
+      // Reset chart type when switching to table
+      if (newTileType === 'table') {
+        setChartType('bar'); // Default, though not used for tables
+      }
+      // Reset query mode when switching tile types
+      if (newTileType !== 'query') {
+        setIsQueryMode(false);
+        setCustomQuery('');
+      }
+    }
+  };
+  
+  // Handle chart type change
+  const handleChartTypeChange = (event: React.MouseEvent<HTMLElement>, newChartType: 'bar' | 'line' | 'pie' | 'donut') => {
+    if (newChartType) {
+      setChartType(newChartType);
+    }
+  };
+  
+  // Handle connection change
+  const handleConnectionChange = (event: SelectChangeEvent) => {
+    const newConnectionId = event.target.value;
+    setConnectionId(newConnectionId);
+    setFields([]); // Reset fields when connection changes
+    
+    // Load fields for the selected connection
+    if (newConnectionId) {
+      setLoading(true);
+      databaseConnectionService.getFields(newConnectionId)
+        .then((response) => {
+          setFields(response.data);
+          
+          // Build mapping between field IDs and their source tables
+          const tableMap = new Map<string, string>();
+          response.data.forEach((field: DatabaseField) => {
+            tableMap.set(field.name, field.table);
+          });
+          setFieldTableMap(tableMap);
+        })
+        .catch((error) => {
+          console.error('Error loading fields:', error);
+          setError('Failed to load fields');
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    }
+  };
+
+  // UI states
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  
+  // Store mapping between field IDs and their source tables (needed for SQL generation)
+  const [fieldTableMap, setFieldTableMap] = useState<Map<string, string>>(new Map());
+
+  // Load connections on mount
+  useEffect(() => {
+    const loadConnections = async () => {
+      try {
+        setLoading(true);
+        const data = await databaseConnectionService.getAllConnections();
+        setConnections(data);
+        if (data.length > 0) {
+          setConnectionId(data[0].id);
+          // No need to set selectedConnection as we use connectionId directly
+        }
+      } catch (error) {
+        console.error('Failed to load connections:', error);
+        setError('Failed to load connections');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (open) {
+      loadConnections();
+    }
+  }, [open]);
+
+  // Initialize form when editing an existing tile
+  useEffect(() => {
+    if (!tile || !open) return;
+    
+    // Set basic info
+    setName(tile.title || '');
+    setDescription(tile.description || '');
+    
+    // Handle tile type with UI-specific types
+    if (tile.config?.uiType) {
+      // If UI type is stored in config, use it
+      setTileType(tile.config.uiType as 'chart' | 'table' | 'metric' | 'text' | 'query');
+    } else {
+      // Otherwise map from backend type
+      switch(tile.type) {
+        case 'chart': setTileType('chart'); break;
+        case 'text': setTileType('text'); break;
+        case 'kpi': setTileType('metric'); break;
+        default: setTileType('chart');
+      }
+    }
+    
+    // Set connection ID from either top level or config
+    if (tile.connectionId) {
+      setConnectionId(tile.connectionId);
+    } else if (tile.config?.connectionId) {
+      setConnectionId(tile.config.connectionId);
+    }
+    
+    if (tile.config) {
+      // Handle chart type - prefer UI-specific chart type if available
+      if (tile.config.uiChartType) {
+        setChartType(tile.config.uiChartType as 'bar' | 'line' | 'pie' | 'donut');
+      } else if (tile.config.chartType) {
+        setChartType(tile.config.chartType);
+      }
+      
+      // Set dimensions if available
+      if (Array.isArray(tile.config.dimensions)) {
+        setDimensions(tile.config.dimensions);
+      }
+      
+      // Handle measures array vs single measure for metrics
+      if (Array.isArray(tile.config.measures)) {
+        setMeasures(tile.config.measures);
+      } else if (tile.config.measure) { 
+        // Support for old format that only had single measure
+        setMeasures([tile.config.measure]);
+      }
+      
+      // Handle text rows
+      if (Array.isArray(tile.config.textRows)) {
+        // Ensure all text rows have IDs
+        const validTextRows = tile.config.textRows.map(row => ({
+          ...row,
+          id: row.id || uuidv4()
+        }));
+        setTextRows(validTextRows);
+      }
+      
+      // Handle query mode for text tiles
+      if (tile.config.isQueryMode) {
+        setIsQueryMode(true);
+        if (tile.config.customQuery) {
+          setCustomQuery(tile.config.customQuery);
+        }
+      }
+    }
+  }, [tile, open]);
+  
+  // Load database fields when connection is selected
+  useEffect(() => {
+    if (connectionId) {
+      loadConnectionSchema();
+    }
+  }, [connectionId]);
+
+  const loadConnectionSchema = async () => {
+    if (!connectionId) return;
+    
+    try {
+      setLoading(true);
+      setError('');
+      
+      const authHeaders = await getAuthHeaders();
+      const response = await axios.get(`/api/connections/${connectionId}/schema`, { headers: authHeaders });
+      console.log('Schema response:', response.data);
+      
+      // Extract fields from schema, handling different response formats
+      let schemaData;
+      if (response.data.schema) {
+        schemaData = response.data.schema;
+      } else if (response.data.data) {
+        schemaData = response.data.data;
+      } else {
+        schemaData = response.data;
+      }
+      
+      // Convert schema to a flat list of database fields
+      const fields: DatabaseField[] = [];
+      
+      // Process schema based on its structure
+      if (Array.isArray(schemaData)) {
+        // Handle array of tables format
+        schemaData.forEach((table: any) => {
+          const tableName = table.name || table.table_name;
+          if (table.columns) {
+            table.columns.forEach((column: any) => {
+              fields.push({
+                name: column.name || column.column_name,
+                type: column.type || column.data_type,
+                table: tableName,
+                description: column.description || ''
+              });
+            });
+          }
+        });
+      } else if (typeof schemaData === 'object') {
+        // Handle object format with tables as keys
+        Object.keys(schemaData).forEach(tableName => {
+          const columns = schemaData[tableName];
+          if (Array.isArray(columns)) {
+            columns.forEach(column => {
+              fields.push({
+                name: column.name || column.column_name,
+                type: column.type || column.data_type,
+                table: tableName,
+                description: column.description || ''
+              });
+            });
+          }
+        });
+      }
+      
+      setDatabaseFields(fields);
+    } catch (err) {
+      console.error('Error loading connection schema:', err);
+      setError('Failed to load database schema');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
+    setTabValue(newValue);
+  };
+
+  const handleChartTypeChange = (event: SelectChangeEvent) => {
+    setChartType(event.target.value as 'bar' | 'line' | 'pie' | 'donut');
+  };
+
+  const handleConnectionChange = (event: SelectChangeEvent) => {
+    setConnectionId(event.target.value);
+    // Reset fields since the connection changed
+    setDimensions([]);
+    setMeasures([]);
+    
+    // Find the selected connection
+    const connection = connections.find(c => c.id === event.target.value);
+    // setSelectedConnection(connection || null);
+  };
+
+  const handleAddDimension = (field: DatabaseField) => {
+    const fieldId = `${field.table}.${field.name}`;
+    const dimension: DimensionField = {
+      fieldId,
+      fieldName: field.name
+    };
+    
+    // Check if field is already added
+    if (!dimensions.some(d => d.fieldId === fieldId)) {
+      setDimensions([...dimensions, dimension]);
+      // Store table name for this field ID
+      fieldTableMap.set(fieldId, field.table);
+    }
+  };
+
+  const handleRemoveDimension = (index: number) => {
+    const newDimensions = [...dimensions];
+    newDimensions.splice(index, 1);
+    setDimensions(newDimensions);
+  };
+
+  const handleAddMeasure = (field: DatabaseField) => {
+    if (!isNumericField(field)) {
+      // Only allow adding numeric fields as measures
+      return;
+    }
+    
+    // Check if measure already exists
+    const exists = measures.some(m => m.fieldId === field.name);
+    
+    if (!exists) {
+      const newMeasure: MeasureField = {
+        fieldId: field.name,
+        fieldName: field.name,
+        aggregation: 'sum',
+        alias: `${field.name}_sum` // Add alias property
+      };
+      
+      setMeasures([...measures, newMeasure]);
+      // Store table name for this field ID
+      fieldTableMap.set(newMeasure.fieldId, field.table);
+    }
+  };
+
+  const handleRemoveMeasure = (index: number) => {
+    const newMeasures = [...measures];
+    newMeasures.splice(index, 1);
+    setMeasures(newMeasures);
+  };
+
+  const handleMeasureAggregationChange = (index: number, aggregation: string) => {
+    setMeasures(prev => {
+      const updated: MeasureField[] = [...prev];
+      updated[index].aggregation = aggregation;
+      return updated;
+    });
+  };
+
+  // Functions for handling text tile rows
+  const handleAddTextRow = () => {
+    const newRow: TextRow = {
+      id: uuidv4(), // Generate unique ID
+      type: 'text',
+      content: '',
+      isQuery: false
+    };
+    
+    setTextRows([...textRows, newRow]);
+  };
+  
+  const handleTextChange = (index: number, value: string) => {
+    const updatedRows = [...textRows];
+    updatedRows[index].content = value;
+    setTextRows(updatedRows);
+  };
+  
+  const handleRemoveTextRow = (id: string) => {
+    setTextRows(textRows.filter(row => row.id !== id));
+  };
+  
+  const handleTextRowTypeChange = (id: string, type: 'header' | 'subheader' | 'text') => {
+    setTextRows(textRows.map(row => 
+      row.id === id ? { ...row, type } : row
+    ));
+  };
+  
+  const handleTextRowContentChange = (id: string, content: string) => {
+    setTextRows(textRows.map(row => 
+      row.id === id ? { ...row, content } : row
+    ));
+  };
+  
+  const handleToggleRowQueryMode = (id: string) => {
+    setTextRows(textRows.map(row => 
+      row.id === id ? { ...row, isQuery: !row.isQuery } : row
+    ));
+  };
+
+  // Validate the tile configuration before saving
+  const isValid = (): boolean => {
+    if (!name.trim()) {
+      setError('Title is required');
+      return false;
+    }
+    
+    if (tileType === 'chart' && measures.length === 0) {
+      setError('At least one measure is required for a chart');
+      return false;
+    }
+    
+    if (tileType === 'metric' && measures.length === 0) {
+      setError('At least one measure is required for a metric tile');
+      return false;
+    }
+    
+    if ((tileType === 'chart' || tileType === 'table' || tileType === 'metric') && !connectionId) {
+      setError('A connection is required for this tile type');
+      return false;
+    }
+    
+    return true;
+  };
+
+  const handleSave = async () => {
+    if (!isValid()) {
+      // Error is set by the isValid function
+      setSaving(false);
+      return;
+    }
+    setError('');
+    setSaving(true);
+    
+    try {
+      // Generate final config object based on tile type
+      let config: any = {};
+      
+      switch (tileType) {
+        case 'chart':
+          config = {
+            chartType,
+            uiChartType: chartType, // Store UI chart type explicitly
+            dimensions,
+            measures,
+            uiType: 'chart', // Store original UI type
+            metadata: {
+              sqlQuery: generateSqlQuery()
+            }
+          };
+          break;
+        case 'table':
+          // For table, we need to use a backend-compatible chartType
+          // but store 'table' as uiChartType
+          config = {
+            chartType: 'bar', // Use a supported backend chart type
+            uiChartType: 'table', // Store UI-specific chart type
+            dimensions,
+            measures,
+            uiType: 'table', // Store original UI type
+            metadata: {
+              sqlQuery: generateSqlQuery()
+            }
+          };
+          break;
+        case 'metric':
+          if (measures.length === 0) {
+            setError('At least one measure is required for a metric tile');
+            setSaving(false);
+            return;
+          }
+          config = {
+            measure: measures[0],
+            measures, // Also include as array for better compatibility
+            uiType: 'metric', // Store original UI type
+            metadata: {
+              sqlQuery: generateSqlQuery()
+            }
+          };
+          break;
+          
+        case 'text':
+          config = {
+            textRows,
+            uiType: 'text', // Store original UI type
+            isQueryMode: false
+          };
+          break;
+        case 'query':
+          config = {
+            textRows: isQueryMode ? [] : textRows,
+            uiType: 'query',
+            isQueryMode: isQueryMode,
+            customQuery: isQueryMode ? customQuery : undefined,
+            connectionId: isQueryMode ? connectionId : undefined
+          };
+          break;
+      }
+      
+      // Add connection ID to config if available
+      if (connectionId) {
+        config.connectionId = connectionId;
+      }
+      
+      // Map UI tile type to backend-accepted type
+      // Backend only accepts 'chart', 'text', 'kpi'
+      let backendType: 'chart' | 'text' | 'kpi';
+      switch(tileType) {
+        case 'chart':
+        case 'table':
+          backendType = 'chart';
+          break;
+        case 'metric':
+          backendType = 'kpi';
+          break;
+        case 'text':
+        case 'query':
+          backendType = 'text';
+          break;
+        default:
+          backendType = 'chart';
+          break;
+      }
+      
+      // Create tile data object with the mapped type
+      const tileData: CreateTileDto = {
+        title: name,
+        description: description || undefined,
+        type: backendType, // Use the mapped backend type
+        dashboardId,
+        connectionId: connectionId || undefined,
+        config: config,
+        // Make sure position is included if editing an existing tile
+        position: getTilePosition()
+      };
+      
+      console.log('Saving tile with data:', JSON.stringify(tileData, null, 2));
+      
+      // Create or update tile
+      if (tile?.id) {
+        // Update existing tile
+        await projectService.updateTile(tile.id, tileData);
+      } else {
+        // Create new tile
+        await projectService.createTile(tileData);
+      }
+      
+      onSave();
+      onClose();
+    } catch (error) {
+      console.error('Failed to save tile:', error);
+      setError(`Failed to save tile: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const generateSqlQuery = (): string => {
+    if (dimensions.length === 0 || measures.length === 0) {
+      return '';
+    }
+    
+    const tables = new Set<string>();
+    const dimensionColumns: string[] = [];
+    const measureColumns: string[] = [];
+    
+    // Collect tables and format columns
+    dimensions.forEach(dim => {
+      const table = fieldTableMap.get(dim.fieldId) || 'unknown_table';
+      tables.add(table);
+      dimensionColumns.push(`${table}.${dim.fieldName}`);
+    });
+    
+    measures.forEach(measure => {
+      const table = fieldTableMap.get(measure.fieldId) || 'unknown_table';
+      tables.add(table);
+      measureColumns.push(`${measure.aggregation}(${table}.${measure.fieldName}) as ${measure.alias}`);
+    });
+    
+    // Build SQL query
+    const tablesList = Array.from(tables);
+    const selectClause = [...dimensionColumns, ...measureColumns].join(', ');
+    const fromClause = tablesList[0]; // Start with first table
+    const groupByClause = dimensionColumns.length > 0 ? `GROUP BY ${dimensionColumns.join(', ')}` : '';
+
+    // Simple query for now - in a real app we would need to handle JOINs between tables
+    return `SELECT ${selectClause} FROM ${fromClause} ${tablesList.length > 1 ? '/* JOIN logic needed for multiple tables */' : ''} ${groupByClause}`;
+  };
+  
+  // Helper to determine if a field is numeric
+  const isNumericField = (field: DatabaseField): boolean => {
+    const numericTypes = ['number', 'integer', 'int', 'float', 'decimal', 'double', 'numeric'];
+    return numericTypes.some(type => field.type.toLowerCase().includes(type));
+  };
+
+  // Helper function to get chart icon based on chart type
+  const getChartIcon = (type: string) => {
+    switch (type) {
+      case 'bar':
+        return <BarChartIcon />;
+      case 'line':
+        return <LineChartIcon />;
+      case 'pie':
+        return <PieChartIcon />;
+      case 'donut':
+        return <PieChartIcon />;
+      default:
+        return <BarChartIcon />;
+    }
+  };
+  
+  // Fix any potential issues with position data
+  const getTilePosition = () => {
+    if (tile?.position) {
+      return tile.position;
+    } else if (tile?.x !== undefined && tile.x !== null) {
+      return {
+        x: tile.x || 0,
+        y: tile.y || 0,
+        w: tile.w || 2,
+        h: tile.h || 2
+      };
+    }
+    return undefined;
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle>
+        {tile ? 'Edit Tile' : 'Create New Tile'}
+      </DialogTitle>
+      <DialogContent dividers>
+        <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+          <Tabs value={tabValue} onChange={handleTabChange} aria-label="tile editor tabs">
+            <Tab label="General" id="tile-editor-tab-0" aria-controls="tile-editor-tabpanel-0" />
+            <Tab label="Data" id="tile-editor-tab-1" aria-controls="tile-editor-tabpanel-1" />
+            <Tab label="Visualization" id="tile-editor-tab-2" aria-controls="tile-editor-tabpanel-2" />
+          </Tabs>
+        </Box>
+        
+        {/* General Tab */}
+        <TabPanel value={tabValue} index={0}>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Tile Name"
+            fullWidth
+            variant="outlined"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+            error={!name.trim()}
+            helperText={!name.trim() ? 'Name is required' : ''}
+            sx={{ mb: 2 }}
+          />
+          
+          <TextField
+            margin="dense"
+            label="Description"
+            fullWidth
+            multiline
+            rows={3}
+            variant="outlined"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            sx={{ mb: 2 }}
+          />
+          
+          <Grid container spacing={2}>
+            <Grid item xs={12}>
+              <FormControl fullWidth>
+                <InputLabel>Tile Type</InputLabel>
+                <Select
+                  value={tileType}
+                  onChange={(e) => setTileType(e.target.value as 'chart' | 'table' | 'metric' | 'text' | 'query')}
+                  label="Tile Type"
+                >
+                  <MenuItem value="chart">Chart</MenuItem>
+                  <MenuItem value="table">Table</MenuItem>
+                  <MenuItem value="metric">Metric</MenuItem>
+                  <MenuItem value="text">Text</MenuItem>
+                  <MenuItem value="query">Query</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+
+            <Grid item xs={12}>
+              <FormControl fullWidth required={tileType !== 'text'} error={!connectionId && error !== '' && tileType !== 'text'}>
+                <InputLabel>Database Connection</InputLabel>
+                <Select
+                  value={connectionId}
+                  onChange={handleConnectionChange}
+                  label="Database Connection"
+                >
+                  <MenuItem value="">
+                    <em>Select a database connection</em>
+                  </MenuItem>
+                  {connections.map((connection) => (
+                    <MenuItem key={connection.id} value={connection.id}>
+                      {connection.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+                {!connectionId && error && tileType !== 'text' && (
+                  <FormHelperText>Please select a database connection</FormHelperText>
+                )}
+              </FormControl>
+            </Grid>
+
+            {tileType === 'chart' && (
+              <Grid item xs={12}>
+                <FormControl fullWidth>
+                  <InputLabel id="chart-type-select-label">Chart Type</InputLabel>
+                  <Select
+                    labelId="chart-type-select-label"
+                    id="chart-type-select"
+                    value={chartType}
+                    label="Chart Type"
+                    onChange={handleChartTypeChange}
+                    startAdornment={
+                      <Box sx={{ mr: 1, display: 'flex', alignItems: 'center' }}>
+                        {getChartIcon(chartType)}
+                      </Box>
+                    }
+                  >
+                    <MenuItem value="bar">Bar Chart</MenuItem>
+                    <MenuItem value="line">Line Chart</MenuItem>
+                    <MenuItem value="pie">Pie Chart</MenuItem>
+                    <MenuItem value="donut">Donut Chart</MenuItem>
+                  </Select>
+                  <FormHelperText>Select the type of visualization</FormHelperText>
+                </FormControl>
+              </Grid>
+            )}
+          </Grid>
+        </TabPanel>
+        
+        {/* Data Tab */}
+        <TabPanel value={tabValue} index={1}>
+          {tileType === 'text' ? (
+            <Grid container spacing={3}>
+              <Grid item xs={12}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
+                  <Typography variant="h6">Text Content</Typography>
+                  <Button
+                    variant="outlined"
+                    startIcon={<AddIcon />}
+                    size="small"
+                    onClick={handleAddTextRow}
+                  >
+                    Add Row
+                  </Button>
+                </Box>
+                
+                {textRows.map((row) => (
+                  <Paper
+                    key={row.id}
+                    variant="outlined"
+                    sx={{ p: 2, mb: 2 }}
+                  >
+                    <Grid container spacing={2}>
+                      {/* Row Controls */}
+                      <Grid item xs={12}>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                          <ToggleButtonGroup
+                            value={row.type}
+                            exclusive
+                            onChange={(_, newType) => newType && handleTextRowTypeChange(row.id, newType as 'header' | 'subheader' | 'text')}
+                            size="small"
+                          >
+                            <ToggleButton value="header">
+                              <TitleIcon fontSize="small" />
+                              <Typography variant="body2" sx={{ ml: 1 }}>
+                                Header
+                              </Typography>
+                            </ToggleButton>
+                            <ToggleButton value="subheader">
+                              <SubtitlesIcon fontSize="small" />
+                              <Typography variant="body2" sx={{ ml: 1 }}>
+                                Subheader
+                              </Typography>
+                            </ToggleButton>
+                            <ToggleButton value="text">
+                              <TextFieldsIcon fontSize="small" />
+                              <Typography variant="body2" sx={{ ml: 1 }}>
+                                Text
+                              </Typography>
+                            </ToggleButton>
+                          </ToggleButtonGroup>
+
+                          <Box>
+                            <FormControlLabel
+                              control={
+                                <Switch
+                                  checked={row.isQuery}
+                                  onChange={() => handleToggleRowQueryMode(row.id)}
+                                  size="small"
+                                  disabled={!connectionId}
+                                />
+                              }
+                              label={row.isQuery ? "SQL Query" : "Direct Text"}
+                              labelPlacement="start"
+                            />
+                            <IconButton
+                              size="small"
+                              color="error"
+                              onClick={() => handleRemoveTextRow(row.id)}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Box>
+                        </Box>
+                      </Grid>
+
+                      {/* Content Input */}
+                      <Grid item xs={12}>
+                        {row.isQuery ? (
+                          <TextField
+                            label="SQL Query"
+                            multiline
+                            rows={4}
+                            placeholder="SELECT column FROM table WHERE condition"
+                            fullWidth
+                            variant="outlined"
+                            value={row.content}
+                            onChange={(e) => handleTextRowContentChange(row.id, e.target.value)}
+                            error={!connectionId}
+                            helperText={!connectionId ? "Select a connection to enable SQL queries" : ""}
+                            InputProps={{
+                              startAdornment: <CodeIcon sx={{ mr: 1, color: 'text.secondary' }} />
+                            }}
+                          />
+                        ) : (
+                          <TextField
+                            label={row.type.charAt(0).toUpperCase() + row.type.slice(1) + " Content"}
+                            multiline
+                            rows={row.type === 'header' ? 1 : row.type === 'subheader' ? 2 : 3}
+                            placeholder={`Enter ${row.type} content here`}
+                            fullWidth
+                            variant="outlined"
+                            value={row.content}
+                            onChange={(e) => handleTextRowContentChange(row.id, e.target.value)}
+                          />
+                        )}
+                      </Grid>
+
+                      {/* Preview of how the text will look */}
+                      {row.content && !row.isQuery && (
+                        <Grid item xs={12}>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', mb: 1, display: 'block' }}>
+                            Preview:
+                          </Typography>
+                          {row.type === 'header' && (
+                            <Typography variant="h4">{row.content}</Typography>
+                          )}
+                          {row.type === 'subheader' && (
+                            <Typography variant="h5">{row.content}</Typography>
+                          )}
+                          {row.type === 'text' && (
+                            <Typography variant="body1">{row.content}</Typography>
+                          )}
+                        </Grid>
+                      )}
+
+                      {/* SQL Query result preview */}
+                      {row.isQuery && row.content && connectionId && (
+                        <Grid item xs={12}>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            startIcon={<StorageIcon />}
+                            onClick={() => {
+                              // Logic to execute the SQL query and show results
+                              console.log(`Execute query: ${row.content} on connection: ${connectionId}`);
+                            }}
+                          >
+                            Test Query
+                          </Button>
+                        </Grid>
+                      )}
+                    </Grid>
+                  </Paper>
+                ))}
+                {textRows.length === 0 && (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <Typography color="text.secondary">
+                      No text rows added. Click "Add Row" to create content.
+                    </Typography>
+                  </Box>
+                )}
+              </Grid>
+            ) : (
+              <Grid container spacing={3}>
+                {/* For non-text tile types, show dimensions and measures */}
+                <Grid item xs={12} md={6}>
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="h6" gutterBottom>Dimensions</Typography>
+                    <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+                      {dimensions.length > 0 ? (
+                        dimensions.map((dimension, index) => (
+                          <Chip
+                            key={index}
+                            label={dimension.fieldName}
+                            onDelete={() => handleRemoveDimension(index)}
+                            sx={{ m: 0.5 }}
+                          />
+                        ))
+                      ) : (
+                        <Typography color="text.secondary">
+                          No dimensions selected. Select fields from the list below.
+                        </Typography>
+
+{/* Preview of how the text will look */}
+{row.content && !row.isQuery && (
+<Grid item xs={12}>
+<Typography variant="caption" sx={{ color: 'text.secondary', mb: 1, display: 'block' }}>
+Preview:
+</Typography>
+{row.type === 'header' && (
+<Typography variant="h4">{row.content}</Typography>
+)}
+{row.type === 'subheader' && (
+<Typography variant="h5">{row.content}</Typography>
+)}
+{row.type === 'text' && (
+<Typography variant="body1">{row.content}</Typography>
+)}
+</Grid>
+)}
+                </Grid>
+
+                <Grid item xs={12} md={6}>
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="h6" gutterBottom>Measures</Typography>
+                    <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+                      {measures.length > 0 ? (
+                        measures.map((measure, index) => (
+                          <Box key={index} sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                            <Chip
+                              label={`${measure.aggregation}(${measure.fieldName})`}
+                              onDelete={() => handleRemoveMeasure(index)}
+                              sx={{ mr: 1 }}
+                            />
+                            <Select
+                              value={measure.aggregation}
+                              onChange={(e) => handleMeasureAggregationChange(index, e.target.value)}
+                              size="small"
+                              sx={{ minWidth: 100 }}
+                            >
+                              <MenuItem value="sum">Sum</MenuItem>
+                              <MenuItem value="avg">Average</MenuItem>
+                              <MenuItem value="min">Min</MenuItem>
+                              <MenuItem value="max">Max</MenuItem>
+                              <MenuItem value="count">Count</MenuItem>
+                            </Select>
+                          </Box>
+                        ))
+                      ) : (
+                        <Typography color="text.secondary">
+                          No measures selected. Select fields from the list below.
+                        </Typography>
+                      )}
+                    </Paper>
+
+                    <Typography variant="subtitle2" gutterBottom>Available Fields</Typography>
+                    <Paper variant="outlined" sx={{ p: 2, maxHeight: 200, overflow: 'auto' }}>
+                      {fields.filter(isNumericField).map((field) => (
+                        <Chip
+                          key={field.name + field.table}
+                          label={`${field.table}.${field.name}`}
+                          onClick={() => handleAddMeasure(field)}
+                          sx={{ m: 0.5, cursor: 'pointer' }}
+                          variant="outlined"
+                        />
+                      ))}
+                      {fields.length === 0 && (
+                        <Typography color="text.secondary">
+                          {loading ? 'Loading fields...' : 'Select a connection to view available fields'}
+                        </Typography>
+                      )}
+                    </Paper>
+                  </Box>
+                </Grid>
+
+                {/* SQL Preview */}
+                <Grid item xs={12}>
+                  <Typography variant="h6" gutterBottom>SQL Preview</Typography>
+                  <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f5f5f5' }}>
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                      {generateSqlQuery()}
+                    </Typography>
+                  </Paper>
+                </Grid>
+              </Grid>
+            )}
+          </TabPanel>
+
+          {/* Visualization Tab */}
+          <TabPanel value={tabValue} index={2}>
+            <Typography variant="body1">This is a preview of your tile.</Typography>
+            {/* Visualization preview would go here */}
+          </TabPanel>
+        </DialogContent>
+        <DialogActions>
+        <Button onClick={onClose} color="inherit">
+          Cancel
+        </Button>
+        <LoadingButton
+          onClick={handleSave}
+          variant="contained"
+          color="primary"
+          loading={saving}
+          disabled={!isValid() || saving}
+        >
+          Save
+        </LoadingButton>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default TileEditor;
