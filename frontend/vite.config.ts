@@ -11,10 +11,11 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0', // 👈 REQUIRED for Docker to expose the server
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://host.docker.internal:3001', // 👈 use this to reach backend on host
         changeOrigin: true,
       },
     },
