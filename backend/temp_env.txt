@@ -1,1 +1,0 @@
-# Server Configuration\nNODE_ENV=development\nPORT=3001\nAPI_URL=http://localhost:3001\nCORS_ORIGIN=http://localhost:3000\n\n# Rest of your .env file remains unchanged
